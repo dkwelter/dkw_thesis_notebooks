@@ -1,0 +1,13 @@
+source	hex	name
+mammal	"#FDE725"	goldenrod1
+bird	"#C2DF23"	olivedrab2
+reptile	"#85D54A"	yellowgreen
+fish	"#51C56A"	seagreen3
+invertebrate	"#2BB07F"	mediumseagreen
+food	"#1E9B8A"	cyan4
+built	"#25858E"	turquoise4
+plant	"#433E85"	slateblue4
+sea water	"#2D708E"	steelblue4
+marine soil	"#38598C"	steelblue4
+terrestrial water	"#482173"	purple4
+soil	"#440154"	midnightblue
