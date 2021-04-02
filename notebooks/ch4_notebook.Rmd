@@ -1,0 +1,577 @@
+---
+title: "Thesis Chapter 4 Analysis"
+output: html_notebook
+---
+
+Chapter 4 abstract: 
+I was interested in how  Psychrobacter  isolated from different ecological niches might exhibit differences in phenotypic behavior, so I performed a large scale phenotype collection on 85 Psychrobacter  strains. I collected information on strains’ oxygen utilization profiles and abilities (or lack thereof) to grow in 24 different conditions, along with growth rate and maximum optical density reached. I found that  Psychrobacter  isolation source is strongly correlated with ability/inability to grow under certain conditions, with strains isolated from mammals and birds more likely to grow in rich media, low salt, and high temperature conditions compared to strains from other isolation sources. Isolation source and isolation location are also very weakly correlated with growth rate and maximum optical density, but explain very little of the variation in the data. Strains from birds and mammals are less likely to be strict aerobes than strains from other isolation sources, but not significantly. Overall, my data shows that  Psychrobacter  strains isolated from warm-bodied hosts behave somewhat differently than  Psychrobacter  strains from other isolation sources, and in particular, this difference is likely driven by more phylogenetically basal strains.
+
+
+```{r setup, echo = FALSE}
+setwd("~/ownCloud/Psychrobacter/Data_Analysis/PANX/thesis/")
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+library(vegan)
+library(treeWAS)
+library(phytools)
+library(caret)
+
+library(reshape2)
+library(lme4)
+
+library(ggpubr)
+
+psych_strain_collection = read.delim("Psychrobacter_straininfo_mastertable.txt", stringsAsFactors = F)
+psych_strain_collection$source = factor(psych_strain_collection$source, 
+                                        levels = c("mammal", "bird", "fish", "invertebrate",
+                                                   "food", "built",
+                                                   "sea water", "marine soil", "terrestrial water", "soil"))
+
+
+psych_strain_collection$ISME_source = factor(psych_strain_collection$ISME_source,
+                                             levels = c("warm host", "other host", "food", "marine", "terrestrial"))
+ISMEcolors = c("#F9D503", "#5DC863", "#21908C", "#3B528B", "#440154")
+
+P.tree = read.tree("Psychfinal_outgroupMoraxlincolnii.nwk")
+P.tree = root(P.tree, "Moraxella_lincolnii", resolve.root = T)
+P.tree$edge.length[P.tree$edge.length == 0] <- 0.000000001
+P.tree.noout = drop.tip(P.tree, "Moraxella_lincolnii")
+
+psych_gpa = read.delim("psych_20201016_nodash_gpa.txt", stringsAsFactors = F)
+genematrix = read.delim("genematrix_for_treewas_fixeddashes.txt", stringsAsFactors = F, row.names = 1)
+
+
+psych_eggnog_annotations = read.delim("Psych_20201016_eggnog_clusters_annotations.txt", stringsAsFactors = F)
+
+psych_PCAT = read.delim("Psych_20201016_PCAT.txt", stringsAsFactors = F)
+
+colors = read.delim("isolationsource_hexcodes.txt", stringsAsFactors = F)
+#colorspsychonly = colors %>% filter(source %in% unique(unlist(psych_strain_collection$source)))
+
+#cols = colorspsychonly$hex
+#names(cols) = colorspsychonly$source
+
+psych_growthbin = read.delim("psychrobacter_growthbin.txt", stringsAsFactors = F)
+psych_growthcurves = read.delim("cleanedup_GCmodels.txt", stringsAsFactors = F)
+psych_growthcurves = left_join(psych_growthcurves, psych_strain_collection[,c(5,3)])
+
+psych_growthcurves = na.omit(psych_growthcurves)
+
+#test176 = border_melt %>% filter(X == "GC00000176_r1_1")
+
+#growthbin_treewas_results = read.delim("growthbinPCA_PC_treewas.txt", stringsAsFactors = F)
+goterms_map = read.delim("map_go_name.txt", stringsAsFactors = F)
+
+
+bileoxy = read.delim("bile_and_oxygen.txt", stringsAsFactors = F)
+
+#borderline_eco_hits = read.delim("borderline_treewas_ecotype_geneclusters.txt", stringsAsFactors = F)
+
+```
+
+```{r}
+sessionInfo()
+```
+
+#Growth curve data processing
+I'll analyze GrowthBin separately from growth rate (r) and max OD (k), since I _have_ growth bin data for all conditions, whereas some conditions could not be modeled and the r and k data is therefore missing. 
+
+```{r}
+psychgb = psych_growthbin
+psychgb$gc = str_c(psychgb$medium, psychgb$salt, psychgb$temperature, sep = '_')
+psychgb_agg = aggregate(psychgb$GrowthBin, by = list(psychgb$propername, psychgb$gc), FUN = mean)
+colnames(psychgb_agg) = c("strainID", "GC", "growthbin_ag")
+psychgb_agg$growthbin_ag[psychgb_agg$growthbin_ag < 0.5] <- 0
+psychgb_agg$growthbin_ag[psychgb_agg$growthbin_ag >= 0.5] <- 1
+
+psychgb_agg = psychgb_agg %>% spread(GC, growthbin_ag)
+
+psych_gb_distrib = melt(psychgb_agg)
+(gbdistrib = ggplot(data = psych_gb_distrib, aes(x = value)) + geom_histogram() +
+  theme_classic() + xlab("Growth Bin - averaged across replicates") + ylab("Number of Strains"))
+#set.seed(0)
+#pc <- prcomp(psychgb_agg %>% select(-strainID), scale. = TRUE, retx = TRUE)
+```
+
+###Figure 4.2
+```{r}
+#NMDS for growth bin
+gb_for_nmds = psychgb_agg[,2:25]
+rownames(gb_for_nmds) = psychgb_agg$strainID
+gb_for_nmds = t(gb_for_nmds)
+
+set.seed(0)
+gb_nmds_2dim = metaMDS(gb_for_nmds, k = 2, trymax = 100, autotransform = FALSE)
+gb_nmds_2dim
+
+stressplot(gb_nmds_2dim)
+gb_stress = as.data.frame(cbind(gb_nmds_2dim$diss, gb_nmds_2dim$dist))
+colnames(gb_stress) = c("dissimilarity", "distance")
+(nmds_stress_gb = ggplot(data = gb_stress, aes(x = dissimilarity, y = distance)) + 
+    geom_point() +
+    annotate(geom = "text", x = 0.13, y = 3.5, label = str_c('Non-metric fit, R^2 = 0.99\nLinear fit, R^2 = 0.97')) +
+    theme_classic())
+
+ggarrange(gbdistrib, nmds_stress_gb)
+
+```
+
+###Figure 4.3
+```{r}
+psychkr = psych_growthcurves %>% select(-strain_plus_code,-GrowthBin)
+psychkr$r[psychkr$r == 0] <- NA
+psychkr$gc = str_c(psychkr$medium, psychkr$salt, psychkr$temperature, sep = '_')
+psychkr_agg = suppressWarnings(aggregate(psychkr, by = list(psychkr$strainID, psychkr$gc), FUN = mean))
+psychkr_agg = psychkr_agg[,c(1,2,8:12)]
+colnames(psychkr_agg)[1:2] = c("strainID", "GC")
+psychkr_agg_k = psychkr_agg %>% select(strainID, GC, k) %>% spread(GC, k)
+colnames(psychkr_agg_k)[2:25] <- paste(colnames(psychkr_agg_k)[2:25], "k", sep = "_")
+
+psychkr_agg_r = psychkr_agg %>% select(strainID, GC, r) %>% spread(GC, r)
+colnames(psychkr_agg_r)[2:25] <- paste(colnames(psychkr_agg_r)[2:25], "r", sep = "_")
+
+psych_kr_kr = left_join(psychkr_agg_k, psychkr_agg_r)
+
+library(randomForest)
+
+psych_kr_kr = na.roughfix(psych_kr_kr[,2:49])
+rownames(psych_kr_kr) = psychkr_agg_k$strainID
+psych_kr_kr <- psych_kr_kr %>% 
+  filter_all(any_vars(. != 0))
+setdiff(psychkr_agg_k$strainID, rownames(psych_kr_kr))
+
+psych_kr_distrib = melt(psych_kr_kr)
+(krdistrib = ggplot(data = psych_kr_distrib, aes(x = value)) + geom_histogram(bins = 50) +
+  theme_classic() + xlab("K and r values") + ylab("Number of Strains"))
+
+psych_kr_distrib_nozero = psych_kr_distrib %>% filter(value != 0)
+ggplot(data = psych_kr_distrib_nozero, aes(x = value)) + geom_histogram(bins = 50) +
+  theme_classic() + xlab("K and r values") + ylab("Number of Strains")
+
+psych_kr_kr_t = t(psych_kr_kr)
+psych_kr_kr_t_scale = apply(psych_kr_kr_t, MARGIN = 2, FUN = function(X) (X - min(X))/diff(range(X)))
+set.seed(0)
+kr_nmds_2dim = metaMDS(psych_kr_kr_t_scale, k = 2, trymax = 100, autotransform = FALSE)
+
+stressplot(kr_nmds_2dim)
+kr_stress = as.data.frame(cbind(kr_nmds_2dim$diss, kr_nmds_2dim$dist))
+colnames(kr_stress) = c("dissimilarity", "distance")
+(nmds_stress = ggplot(data = kr_stress, aes(x = dissimilarity, y = distance)) + 
+    geom_point() +
+    annotate(geom = "text", x = 0.13, y = 3.5, label = str_c('Non-metric fit, R^2 = 0.99\nLinear fit, R^2 = 0.96')) +
+    theme_classic())
+
+ggarrange(krdistrib, nmds_stress)
+```
+
+###Figure 4.5
+```{r}
+#variables
+gb_datascores = as.data.frame(vegan::scores(gb_nmds_2dim))
+gb_datascores$GC = rownames(gb_datascores)
+
+gb_datascores$medium = str_split_fixed(gb_datascores$GC, "_", 3)[,1]
+gb_datascores$salt = str_split_fixed(gb_datascores$GC, "_", 3)[,2]
+gb_datascores$temperature = str_split_fixed(gb_datascores$GC, "_", 3)[,3]
+
+gb_datascores$salt = factor(gb_datascores$salt, levels = c("0", "2.5", "5", "10"))
+gb_datascores$temperature = factor(gb_datascores$temperature, levels = c("4", "25", "37"))
+
+(gb_NMDS12_temp = ggplot(data = gb_datascores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = gb_datascores, aes(color = temperature), size = 5) + 
+    scale_color_manual(name = 'Temperature\n(˚C)', values = c("cadetblue3","moccasin", "lightsalmon")) +
+    theme_classic())
+
+(gb_NMDS12_salt = ggplot(data = gb_datascores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = gb_datascores, aes(color = salt), size = 5) + 
+    scale_color_manual(name = 'Added NaCl %', values = c("grey83", "skyblue3", "dodgerblue", "dodgerblue4")) +
+    theme_classic())
+
+(gb_NMDS12_med = ggplot(data = gb_datascores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = gb_datascores, aes(color = medium), size = 5) + 
+    scale_color_manual(name = "Medium Base", values = c("coral4","lightsalmon")) +
+    theme_classic())
+
+gb_en_var = envfit(gb_nmds_2dim, gb_datascores[,4:6], permutations = 1000)
+gb_en_var
+gb_en_coord_fact = as.data.frame(vegan::scores(gb_en_var, "factors"))
+
+(gb_NMDS12_temp_env = ggplot(data = gb_datascores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = gb_datascores, aes(color = temperature), size = 5) + 
+    scale_color_manual(name = 'Temperature\n(˚C)', values = c("cadetblue3","moccasin", "lightsalmon")) +
+    geom_segment(aes(x = 0, y = 0, xend = NMDS1, yend = NMDS2), data = gb_en_coord_fact, size = 1, alpha = 0.5, color = "grey30") +
+    geom_point(data = gb_en_coord_fact, aes(x = NMDS1, y = NMDS2), shape = "diamond", size = 4, alpha = 0.6, color = "navy") +
+    geom_text(data = gb_en_coord_fact, aes(x = NMDS1, y = NMDS2), colour = "grey30", fontface = "bold", label = row.names(gb_en_coord_fact)) +
+    theme_classic())
+
+ggarrange(gb_NMDS12_temp_env, gb_NMDS12_salt, gb_NMDS12_med, ncol = 3, align = 'hv')
+
+#now for the statistics 
+anosim(gb_for_nmds, grouping = gb_datascores$medium, distance = "bray", permutations = 9999)
+anosim(gb_for_nmds, grouping = gb_datascores$salt, distance = "bray", permutations = 9999)
+anosim(gb_for_nmds, grouping = gb_datascores$temperature, distance = "bray", permutations = 9999)
+
+
+```
+
+###Figure 4.6
+
+```{r}
+gb_indscores = as.data.frame(vegan::scores(gb_nmds_2dim, "species"))
+gb_indscores$strainID = rownames(gb_indscores)
+gb_indscores = left_join(gb_indscores, psych_strain_collection[,c(3, 25:27)])
+
+gb_en_ind = envfit(gb_indscores[,1:2], gb_indscores[,4:6], permutations = 1000, na.rm = TRUE)
+gb_en_ind
+gb_en_ind_coord_fact = as.data.frame(vegan::scores(gb_en_ind, "factors"))
+
+(gb_NMDS12_ind = ggplot(data = gb_indscores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = gb_indscores, aes(color = ISME_source), size = 5) + 
+    scale_color_manual(values = ISMEcolors) +
+    geom_segment(aes(x = 0, y = 0, xend = NMDS1, yend = NMDS2), data = gb_en_ind_coord_fact, size = 1, alpha = 0.5, color = "grey30") +
+    geom_point(data = gb_en_ind_coord_fact, aes(x = NMDS1, y = NMDS2), shape = "diamond", size = 4, alpha = 0.6, color = "navy") +
+    geom_text(data = gb_en_ind_coord_fact, aes(x = NMDS1, y = NMDS2), colour = "grey30", fontface = "bold", label = row.names(gb_en_ind_coord_fact)) +
+    theme_classic() +
+    theme(legend.position = 'bottom'))
+
+(gb_NMDS12_ind_lat = ggplot(data = gb_indscores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = gb_indscores, aes(color = Latitude_j), size = 5) +
+    scale_color_gradient2(low = "midnightblue", mid = "plum", high = "red3") +
+    theme_classic() +
+    theme(legend.position = 'bottom'))
+
+(gb_NMDS12_ind_long = ggplot(data = gb_indscores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = gb_indscores, aes(color = Longitude_j), size = 5) +
+    scale_color_gradient2(low = "seagreen4", mid = "turquoise", high = "navyblue") +
+    theme_classic() +
+    theme(legend.position = 'bottom'))
+
+ggarrange(gb_NMDS12_ind, gb_NMDS12_ind_lat, gb_NMDS12_ind_long, ncol = 3, align = 'hv')
+
+#for the stats
+anosim(t(gb_for_nmds), grouping = gb_indscores$ISME_source, distance = "bray", permutations = 9999)
+
+gb_indscores_na_omit = na.omit(gb_indscores)
+gb_for_nmds_t = t(gb_for_nmds)
+gb_naomit = gb_for_nmds_t[rownames(gb_for_nmds_t) %in% gb_indscores_na_omit$strainID,]
+
+anosim(gb_naomit, grouping = gb_indscores_na_omit$Latitude_j, distance = "bray", permutations = 9999)
+anosim(gb_naomit, grouping = gb_indscores_na_omit$Longitude_j, distance = "bray", permutations = 9999)
+
+```
+
+###Figure 4.7
+```{r}
+colnames(psych_gb_distrib) = c("strainID", "GC", "value")
+psych_gb_distrib$value[psych_gb_distrib$value <= 0.5] <- 0
+psych_gb_distrib$value[psych_gb_distrib$value > 0.5] <- 1
+psych_gb_distrib$medium = str_split_fixed(psych_gb_distrib$GC, "_", 3)[,1]
+psych_gb_distrib$salt = str_split_fixed(psych_gb_distrib$GC, "_", 3)[,2]
+psych_gb_distrib$temperature = str_split_fixed(psych_gb_distrib$GC, "_", 3)[,3]
+
+psych_gb_distrib = left_join(psych_gb_distrib, psych_strain_collection[,c(3, 25:27)])
+
+#iso source effect on gb in LB
+(gb_med = ggplot() + 
+  geom_bar(data = psych_gb_distrib, 
+             aes(x = ISME_source, fill = as.factor(value)), stat = 'count') +
+  scale_fill_manual(values = c("gray87", "gray27")) +
+  facet_wrap(~medium) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1)) +
+    theme(axis.title.x = element_blank()) +
+    labs(fill = "Growth Bin"))
+  
+
+psych_gb_distrib$salt = factor(psych_gb_distrib$salt, levels = c("0", "2.5", "5", "10"))
+(gb_salt = ggplot() + 
+  geom_bar(data = psych_gb_distrib, 
+             aes(x = ISME_source, fill = as.factor(value)), stat = 'count') +
+  scale_fill_manual(values = c("gray87", "gray27")) +
+  facet_wrap(~salt, ncol = 4) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1)) +
+    theme(axis.title.x = element_blank()) +
+    labs(fill = "Growth Bin"))
+
+psych_gb_distrib$temperature = factor(psych_gb_distrib$temperature, levels = c("4", "25", "37"))
+(gb_temp = ggplot() + 
+  geom_bar(data = psych_gb_distrib, 
+             aes(x = ISME_source, fill = as.factor(value)), stat = 'count') +
+  scale_fill_manual(values = c("gray87", "gray27")) +
+  facet_wrap(~temperature, ncol = 3) +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 0.5, hjust=1)) +
+    theme(axis.title.x = element_blank()) +
+    labs(fill = "Growth Bin"))
+
+ggarrange(gb_med, gb_salt, gb_temp, nrow = 3, align = 'v', labels = c("A", "B", "C"))
+
+gb_lb_test = psych_gb_distrib %>% filter(medium == "LB")
+gb_lb_chi = chisq.test(x = gb_lb_test$ISME_source, y = gb_lb_test$value)
+
+gb_0salt_test = psych_gb_distrib %>% filter(salt == "0")
+gb_0salt_chi = chisq.test(x = gb_0salt_test$ISME_source, y = gb_0salt_test$value)
+
+gb_4temp_test = psych_gb_distrib %>% filter(temperature == "4")
+gb_4temp_chi = chisq.test(x = gb_4temp_test$ISME_source, y = gb_4temp_test$value)
+
+gb_37temp_test = psych_gb_distrib %>% filter(temperature == "37")
+gb_37temp_chi = chisq.test(x = gb_37temp_test$ISME_source, y = gb_37temp_test$value)
+
+wh_pvals = c(gb_lb_chi$p.value, gb_0salt_chi$p.value, gb_4temp_chi$p.value, gb_37temp_chi$p.value)
+wh_pval_padj = p.adjust(wh_pvals, method = "BH")
+```
+
+###Figure 4.8
+```{r}
+#variables
+kr_datascores = as.data.frame(vegan::scores(kr_nmds_2dim))
+kr_datascores$gmeasure = rownames(kr_datascores)
+kr_datascores$measure = str_split_fixed(kr_datascores$gmeasure, "_", 4)[,4]
+kr_datascores$gc = str_remove(kr_datascores$gmeasure, "_r")
+kr_datascores$gc = str_remove(kr_datascores$gc, "_k")
+
+growthcurvedummy = unique(psychkr[,c(2:4,12)])
+kr_datascores = left_join(kr_datascores, growthcurvedummy)
+kr_datascores = kr_datascores %>% mutate_at(vars(salt, temperature), as.factor)
+
+(kr_NMDS12_var_temp = ggplot(data = kr_datascores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = kr_datascores, aes(color = temperature, shape = measure), size = 5) + 
+    scale_color_manual(name = 'Temperature\n(˚C)', values = c("cadetblue3","moccasin", "lightsalmon")) +
+    theme_classic())
+
+(kr_NMDS12_var_salt = ggplot(data = kr_datascores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = kr_datascores, aes(color = salt, shape = measure), size = 5) + 
+    scale_color_manual(name = '% Added NaCl', values = c("grey83", "skyblue3", "dodgerblue", "dodgerblue4")) +
+    theme_classic())
+
+(kr_NMDS12_var_med = ggplot(data = kr_datascores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = kr_datascores, aes(color = medium, shape = measure), size = 5) + 
+    scale_color_manual(name = 'Base Medium', values = c("coral4","lightsalmon")) +
+    theme_classic())
+
+kr_en_var = envfit(kr_nmds_2dim, kr_datascores[,c(4,6:8)], permutations = 1000)
+kr_en_var
+kr_en_coord_fact = as.data.frame(vegan::scores(kr_en_var, "factors"))
+
+
+(kr_NMDS12_var_temp_env = ggplot(data = kr_datascores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = kr_datascores, aes(color = temperature, shape = measure), size = 5) + 
+    scale_color_manual(name = 'Temperature\n(˚C)', values = c("cadetblue3","moccasin", "lightsalmon")) +
+    geom_segment(aes(x = 0, y = 0, xend = NMDS1, yend = NMDS2), data = kr_en_coord_fact, size = 1, alpha = 0.5, color = "grey30") +
+    geom_point(data = kr_en_coord_fact, aes(x = NMDS1, y = NMDS2), shape = "diamond", size = 4, alpha = 0.6, color = "navy") +
+    geom_text(data = kr_en_coord_fact, aes(x = NMDS1, y = NMDS2), colour = "grey30", fontface = "bold", label = row.names(kr_en_coord_fact)) +
+    theme_classic())
+
+ggarrange(kr_NMDS12_var_temp_env, kr_NMDS12_var_salt, kr_NMDS12_var_med, ncol = 3, align = 'hv')
+anosim(psych_kr_kr_t, grouping = kr_datascores$medium, distance = "bray", permutations = 9999)
+anosim(psych_kr_kr_t, grouping = kr_datascores$salt, distance = "bray", permutations = 9999)
+anosim(psych_kr_kr_t, grouping = kr_datascores$temperature, distance = "bray", permutations = 9999)
+
+```
+
+###Figure 4.9
+```{r}
+#individuals
+kr_indscores = as.data.frame(vegan::scores(kr_nmds_2dim, "species"))
+kr_indscores$strainID = rownames(kr_indscores)
+kr_indscores = left_join(kr_indscores, psych_strain_collection[,c(3, 25:27)])
+
+kr_en_ind = envfit(kr_indscores[,1:2], kr_indscores[,4:6], permutations = 1000, na.rm = TRUE)
+kr_en_ind 
+kr_en_ind_coord_fact = as.data.frame(vegan::scores(kr_en_ind, "factors"))
+
+(kr_NMDS12_ind = ggplot(data = kr_indscores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = kr_indscores, aes(color = ISME_source), size = 5) + 
+    scale_color_manual(values = ISMEcolors) +
+    geom_segment(aes(x = 0, y = 0, xend = NMDS1, yend = NMDS2), data = kr_en_ind_coord_fact, size = 1, alpha = 0.5, color = "grey30") +
+    geom_point(data = kr_en_ind_coord_fact, aes(x = NMDS1, y = NMDS2), shape = "diamond", size = 4, alpha = 0.6, color = "navy") +
+    geom_text(data = kr_en_ind_coord_fact, aes(x = NMDS1, y = NMDS2), colour = "grey30", fontface = "bold", label = row.names(kr_en_ind_coord_fact)) +
+    theme_classic() +
+    theme(legend.position = 'bottom'))
+
+(kr_NMDS12_ind_lat = ggplot(data = kr_indscores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = kr_indscores, aes(color = Latitude_j), size = 5) +
+    scale_color_gradient2(low = "midnightblue", mid = "plum", high = "red3") +
+    theme_classic() +
+    theme(legend.position = 'bottom'))
+
+(kr_NMDS12_ind_long = ggplot(data = kr_indscores, aes(x = NMDS1, y = NMDS2)) + 
+    geom_point(data = kr_indscores, aes(color = Longitude_j), size = 5) +
+    scale_color_gradient2(low = "seagreen4", mid = "turquoise", high = "navyblue") +
+    theme_classic() +
+    theme(legend.position = 'bottom'))
+
+ggarrange(kr_NMDS12_ind, kr_NMDS12_ind_lat, kr_NMDS12_ind_long, ncol = 3, align = 'hv')
+
+#the statistics
+anosim(psych_kr_kr, grouping = kr_indscores$ISME_source, distance = "bray", permutations = 9999)
+#anosim(psych_kr_kr, grouping = kr_indscores$ecotype, distance = "bray", permutations = 9999)
+
+
+kr_indscores_na_omit = na.omit(kr_indscores)
+kr_naomit = psych_kr_kr[rownames(psych_kr_kr) %in% kr_indscores_na_omit$strainID,]
+
+anosim(kr_naomit, grouping = kr_indscores_na_omit$Latitude_j, distance = "bray", permutations = 9999)
+anosim(kr_naomit, grouping = kr_indscores_na_omit$Longitude_j, distance = "bray", permutations = 9999)
+
+```
+
+###Figure 4.10
+```{r}
+bileoxy_cleaned = left_join(bileoxy, psych_strain_collection[,c(4,3,20:21,25:27)])
+bileoxy_cleaned = bileoxy_cleaned %>% filter(is.na(ISME_source) == FALSE)
+bileoxy_cleaned$BSA = factor(bileoxy_cleaned$BSA, levels = c("0", "0.5", "1", "ND"))
+
+bileoxy_cleaned[is.na(bileoxy_cleaned$BSA) == TRUE,3] <- "ND"
+
+bileoxy_cleaned$TGA = str_replace(bileoxy_cleaned$TGA, "not", "ND")
+bileoxy_cleaned$TGA = str_replace(bileoxy_cleaned$TGA, "unclear", "ND")
+
+bileoxy_cleaned$TGA = factor(bileoxy_cleaned$TGA, levels = c("AR", "AR, MA", "MA", "FA", "ND"))
+bileoxy_cleaned[is.na(bileoxy_cleaned$TGA) == TRUE,2] <- "ND"
+bileoxy_cleaned$w_v_c = factor(bileoxy_cleaned$w_v_c, levels = c("w", "c"))
+
+
+(oxy_source = ggplot(data = bileoxy_cleaned, aes(x = ISME_source, fill = TGA)) + 
+    geom_bar(stat = 'count', position = 'stack') + 
+    scale_fill_manual(values = c("#8B0000", "#B14043", "#D88087", "#FFC0CB", "#8B8C8B")) +
+    xlab("Isolation Source") + ylab("Number of Strains") + 
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)) +
+    theme(legend.position = 'none'))
+
+(oxy_source_lowres = ggplot(data = bileoxy_cleaned, aes(x = w_v_c, fill = TGA)) + 
+    geom_bar(stat = 'count', position = 'stack') + 
+    scale_fill_manual(values = c("#8B0000", "#B14043", "#D88087", "#FFC0CB", "#8B8C8B")) +
+    xlab("Isolation Source") + ylab("Number of Strains") + 
+    theme_classic() +
+    theme(legend.position = 'none'))
+
+(oxy_eco = ggplot(data = bileoxy_cleaned, aes(x = ecotype, fill = TGA)) + 
+    geom_bar(stat = 'count', position = 'stack', width = 0.5) + 
+    scale_fill_manual(values = c("#8B0000", "#B14043", "#D88087", "#FFC0CB", "#8B8C8B")) +
+    xlab("Ecotype") + ylab("Number of Strains") + 
+    theme_classic())
+
+ggarrange(oxy_source, oxy_eco, ncol = 3, align = 'hv')
+#ggarrange(oxy_source, oxy_source_lowres, oxy_eco, ncol = 3, align = 'hv')
+
+#isolation source
+chisq.test(x = bileoxy_cleaned$ISME_source, y = bileoxy_cleaned$TGA)
+
+chi_oxyvsource <- list()
+oxy_source_pval <- c()
+for (i in 1:100){
+    set.seed(i)
+    t1 <- downSample(bileoxy_cleaned, as.factor(bileoxy_cleaned$ISME_source))
+    suppressWarnings(chi_oxyvsource[[i]] <- chisq.test(x = t1$ISME_source, y = t1$TGA))
+    oxy_source_pval <- c(oxy_source_pval, chi_oxyvsource[[i]]$p.value)
+}
+chi_oxyvsource_padj <- p.adjust(oxy_source_pval, method = 'BH')
+table(chi_oxyvsource_padj < 0.05)
+
+chi_oxyvsource_low <- list()
+oxy_sourcelow_pval <- c()
+for (i in 1:100){
+    set.seed(i)
+    t1 <- downSample(bileoxy_cleaned, as.factor(bileoxy_cleaned$w_v_c))
+    suppressWarnings(chi_oxyvsource_low[[i]] <- chisq.test(x = t1$w_v_c, y = t1$TGA))
+    oxy_sourcelow_pval <- c(oxy_sourcelow_pval, chi_oxyvsource_low[[i]]$p.value)
+}
+chi_oxyvsourcelow_padj <- p.adjust(oxy_sourcelow_pval, method = 'BH')
+table(chi_oxyvsourcelow_padj < 0.05)
+
+#ecotype
+chi_oxyveco <- list()
+oxy_eco_pval <- c()
+for (i in 1:100){
+    set.seed(i)
+    t1 <- downSample(bileoxy_cleaned, as.factor(bileoxy_cleaned$ecotype))
+    suppressWarnings(chi_oxyveco[[i]] <- chisq.test(x = t1$ecotype, y = t1$TGA))
+    oxy_eco_pval <- c(oxy_eco_pval, chi_oxyveco[[i]]$p.value)
+}
+
+chi_oxyveco_padj <- p.adjust(oxy_eco_pval, method = 'BH')
+table(chi_oxyveco_padj < 0.05)
+
+
+oxy_filt = bileoxy_cleaned %>% filter(TGA != "ND")
+fisher.test(x = oxy_filt$w_v_c, y = oxy_filt$TGA)
+
+#what about oxygen use as two levels?
+bileoxy_cleaned$oxy2levels = NA
+bileoxy_cleaned$oxy2levels[bileoxy_cleaned$TGA == "AR"] <- "strict aerobe"
+bileoxy_cleaned$oxy2levels[bileoxy_cleaned$TGA != "AR"] <- "not strict aerobe"
+bileoxy_cleaned$oxy2levels[bileoxy_cleaned$TGA == "ND"] <- "ND"
+
+
+bileoxy_cleaned$oxy2levels = factor(bileoxy_cleaned$oxy2levels, levels = c("strict aerobe", "not strict aerobe", "ND"))
+
+fisher.test(x = bileoxy_cleaned$ISME_source, y = bileoxy_cleaned$oxy2levels)
+#fisher.test(x = bileoxy_cleaned$w_v_c, y = bileoxy_cleaned$oxy2levels)
+
+
+(oxy2_source = ggplot(data = bileoxy_cleaned, aes(x = ISME_source, fill = oxy2levels)) + 
+    geom_bar(stat = 'count', position = 'stack') + 
+    scale_fill_manual(values = c("#8B0000","#FFC0CB", "#8B8C8B")) +
+    xlab("Isolation Source") + ylab("Number of Strains") + 
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust=1)))
+
+(oxy2_eco = ggplot(data = bileoxy_cleaned, aes(x = ecotype, fill = oxy2levels)) + 
+    geom_bar(stat = 'count', position = 'stack', width = 0.5) + 
+    scale_fill_manual(values = c("#8B0000","#FFC0CB", "#8B8C8B")) +
+    xlab("Ecotype") + ylab("Number of Strains") + 
+    theme_classic())
+
+ggarrange(oxy2_source, oxy2_eco, ncol = 2, align = 'hv')
+
+
+oxy2_source_pval = c()
+chi_oxy2_source = c()
+for (i in 1:100){
+    set.seed(i)
+    t1 <- downSample(bileoxy_cleaned, as.factor(bileoxy_cleaned$ISME_source))
+    suppressWarnings(chi_oxy2_source[[i]] <- chisq.test(x = t1$ISME_source, y = t1$oxy2levels))
+    oxy2_source_pval <- c(oxy2_source_pval, chi_oxy2_source[[i]]$p.value)
+}
+
+oxy2_source_padj <- p.adjust(oxy2_source_pval, method = 'BH')
+table(oxy2_source_padj < 0.05)
+
+
+
+oxy2_sourcelow_pval = c()
+fish_oxy2_sourcelow = c()
+for (i in 1:100){
+    set.seed(i)
+    t1 <- downSample(bileoxy_cleaned, as.factor(bileoxy_cleaned$w_v_c))
+    suppressWarnings(fish_oxy2_sourcelow[[i]] <- fisher.test(x = t1$ISME_source, y = t1$oxy2levels))
+    oxy2_sourcelow_pval <- c(oxy2_sourcelow_pval, fish_oxy2_sourcelow[[i]]$p.value)
+}
+
+oxy2_sourcelow_padj <- p.adjust(oxy2_sourcelow_pval, method = 'BH')
+table(oxy2_source_padj < 0.05)
+
+
+chisq.test(x = bileoxy_cleaned$ecotype, y = bileoxy_cleaned$oxy2levels)
+
+oxy2_eco_pval = c()
+chi_oxy2_eco = c()
+for (i in 1:100){
+    set.seed(i)
+    t1 <- downSample(bileoxy_cleaned, as.factor(bileoxy_cleaned$ecotype))
+    suppressWarnings(chi_oxy2_eco[[i]] <- chisq.test(x = t1$ecotype, y = t1$oxy2levels))
+    oxy2_eco_pval <- c(oxy2_eco_pval, chi_oxy2_eco[[i]]$p.value)
+}
+
+oxy2_eco_padj <- p.adjust(oxy2_eco_pval, method = 'BH')
+table(oxy2_eco_padj < 0.05)
+```
+

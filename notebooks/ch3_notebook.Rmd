@@ -1,0 +1,718 @@
+---
+title: "Thesis Chapter 3 Analysis"
+output: html_notebook
+---
+
+Chapter 3 Abstract: 
+Ecological niche can drive the genomic diversification of closely related bacterial species. Here, I apply genomic analyses to the genus  Psychrobacter,  known for its particularly wide ecological distribution. I performed a pan-genome analysis, microbial pan-genome wide association, ancestral character estimations, and analysis of selection on protein sequences of 85 strains of  Psychrobacter  to clarify the interactions between isolation source and Psychrobacter  genome evolution. There is some evidence that Psychrobacter isolation source correlates with available gene pool; each isolation source - from warm-bodied hosts such as mammals or birds, other hosts like fish or invertebrates, to food processing, marine, or terrestrial environments - is correlated with unique genes from different COG categories. Strains isolated from invertebrate and fish hosts, as well as food processing environments, have higher numbers of total genes, though fewer unique genes than strains from mammals, birds, or marine environments. After accounting for population structure, however, very few genes correlate with isolation source; there is some evidence for increased horizontal gene transfer in strains isolated from fish and invertebrates, and evidence for increased biofilm formation in strains isolated from food-processing environments. Ancestral character estimation supports that  Psychrobacter  are descended from a warm host-associated bacterium. Finally, there is no correlation between isolation source and cold-adaptation of proteins. Overall, my results show that isolation source has some impact on  Psychrobacter genome evolution, though the population structure of the genus makes it difficult to disentangle its effects.
+
+
+```{r setup, echo=FALSE}
+setwd("~/ownCloud/Psychrobacter/Data_Analysis/PANX/thesis/")
+library(stringr)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggpubr)
+library(ggsignif)
+
+library(seqinr)
+library(reshape2)
+library(phytools)
+
+library(micropan)
+library(corrplot)
+
+library(treeWAS)
+
+psych_PCAT = read.delim("Psych_20201016_PCAT.txt", stringsAsFactors = F)
+uniref_vPsychrobacter_blast <- read.delim("Psych_20201016_vs_uniref_CUSTOMBLASToutput.txt", header = T, stringsAsFactors = F)
+
+P.tree = read.tree("Psychfinal_outgroupMoraxlincolnii.nwk")
+P.tree = root(P.tree, "Moraxella_lincolnii", resolve.root = T)
+P.tree.noout = drop.tip(P.tree, "Moraxella_lincolnii")
+P.tree.noout$edge.length[P.tree.noout$edge.length == 0] <- 0.000000001
+
+psych_genome_summaries = read.delim("genome_summary_statistics.txt", stringsAsFactors = F)
+psych_strain_collection = read.delim("Psychrobacter_straininfo_mastertable.txt", stringsAsFactors = F)
+
+psych_eggnog_annotations = read.delim("Psych_20201016_eggnog_clusters_annotations.txt", stringsAsFactors = F)
+
+psych_gpa = read.delim("psych_20201016_nodash_gpa.txt", stringsAsFactors = F)
+
+ISMEcolors = c("#F9D503", "#5DC863", "#21908C", "#3B528B", "#440154")
+
+
+#output 
+uniref_PCAT = read.delim("psych20201016_unirefPCAT.txt", stringsAsFactors = F)
+psych_highPCAT = read.delim("psych_highPCAT.txt", stringsAsFactors = F) #strain names in the RDS file have the funky dashes issue
+psych_medloPCAT = readRDS("Psychrobacter_nothighPCAT_geneproducts.RDS")
+genes_mat_forpan = read.delim("genematrix_numGCperisolate.txt", stringsAsFactors = F, row.names = 1)
+multicog_geneclusters = read.delim("genecluster_COG_categories.txt", stringsAsFactors = F)
+
+strain_collection = read.delim("PsychrobacterPLUS_straininfo_mastertable.txt", stringsAsFactors = F)
+
+M.tree = read.tree("PsychrobacterMoraxellaphylogeny_Apuyangensisoutgroup.nwk")
+M.tree = root(M.tree, "A_puyangensis", resolve.root = T)
+M.tree$edge.length[M.tree$edge.length == 0] <- 0.000000001
+
+ISMEcolors = c("#F9D503", "#5DC863", "#21908C", "#3B528B", "#440154")
+
+genematrix_treewas = read.delim("genematrix_for_treewas_fixeddashes.txt", stringsAsFactors = F, row.names = 1)
+
+```
+
+```{r}
+sessionInfo()
+```
+
+ 
+ 
+#Pan-genome summary
+```{r}
+genematrix = psych_gpa[,10:ncol(psych_gpa)] #or whichever column your isolate data starts at
+rownames(genematrix) = psych_gpa$geneCluster
+genematrix = apply(genematrix,  2,  function(x) gsub("^$|^ $",  NA,  x)) #replace empty cells with NA
+
+transform_func = function(x) { if (is.na(x) > 0) { r = 0 } else { r = 1 } } #creates a function to recognize when a cell has information in it (in this case,  when an isolate HAS a gene) and replace that cell's contents with "1". otherwise,  replace that cell's contents with "0"
+genematrix_binary <- apply(genematrix, 2, function(x){sapply(x,  transform_func)}) #loop the function created in the step above through our transposed gene matrix
+
+genematrix_binary_t = t(genematrix_binary) #transpose the matrix; need strains to be on the rows and genes to be on the columns
+genematrix_binary_t = as.data.frame(genematrix_binary_t)
+genematrix_binary_t = genematrix_binary_t %>%
+  mutate_if(is.factor, as.numeric) #t() will transform your data into the "matrix" format, and treewas wants it in a dataframe format, so this transforms it back
+rownames(genematrix_binary_t) = colnames(genematrix_binary)
+#to produce output file "genematrix_for_treewas_fixeddashes.txt"
+
+
+genes_mat = genematrix 
+genes_mat_numbered = genes_mat
+for(i in 1:nrow(genes_mat)) {
+  for (j in 1:ncol(genes_mat)) {
+    cell = genes_mat[i,j]
+    num = str_count(cell, ",") + 1
+    if (is.na(cell) == TRUE) {num = 0}
+    genes_mat_numbered[i,j] = num
+  }
+}
+rownames(genes_mat_numbered) = psych_gpa$geneCluster
+genes_mat_numbered = as.data.frame(genes_mat_numbered)
+genes_mat_numbered = genes_mat_numbered %>%
+  mutate_all(as.character) %>%
+  mutate_all(as.numeric)
+
+library(micropan)
+genes_mat_forpan = t(genes_mat_numbered)
+colnames(genes_mat_forpan) = rownames(genes_mat)
+rare = rarefaction(pan.matrix = genes_mat_forpan, n.perm = 999)
+rare.melt = reshape2::melt(rare, id = c("Genome"))
+
+(panrarefaction = ggplot(data = rare.melt, aes(x = Genome, y = value)) + 
+    geom_boxplot(aes(x = Genome, group = Genome), outlier.shape = NA) + 
+    theme_classic() + 
+    xlab("Number of Genomes") + ylab("Number of Novel Orthologs"))
+
+heaps(pan.matrix = genes_mat_forpan, n.perm = 999)
+
+warm = psych_strain_collection %>% filter(ISME_source == "warm host") %>% select(strainID) %>% unlist() %>% unname()
+other = psych_strain_collection %>% filter(ISME_source == "other host") %>% select(strainID) %>% unlist() %>% unname()
+food = psych_strain_collection %>% filter(ISME_source == "food") %>% select(strainID) %>% unlist() %>% unname()
+marine = psych_strain_collection %>% filter(ISME_source == "marine") %>% select(strainID) %>% unlist() %>% unname()
+terrestrial = psych_strain_collection %>% filter(ISME_source == "terrestrial") %>% select(strainID) %>% unlist() %>% unname()
+
+allseqsum = rowSums(genes_mat_numbered)
+names(allseqsum) = rownames(genes_mat)
+allisosum = rowSums(genematrix_binary)
+names(allisosum) = rownames(genes_mat)
+
+pangenome_by_isolation_summary = rbind(allseqsum, allisosum)
+
+pangenome_by_isolation_summary = t(pangenome_by_isolation_summary)
+pangenome_by_isolation_summary = as.data.frame(pangenome_by_isolation_summary)
+pangenome_by_isolation_summary$geneCluster = rownames(pangenome_by_isolation_summary)
+
+
+pangenome_by_isolation_summary$overall_pan_cat = NA
+pangenome_by_isolation_summary$overall_pan_cat[pangenome_by_isolation_summary$allisosum >= 84] <- "core"
+pangenome_by_isolation_summary$overall_pan_cat[pangenome_by_isolation_summary$allisosum <= 83 & pangenome_by_isolation_summary$allisosum >= 77] <- "soft core"
+pangenome_by_isolation_summary$overall_pan_cat[pangenome_by_isolation_summary$allisosum <= 76 & pangenome_by_isolation_summary$allisosum >= 2 ] <- "shell"
+pangenome_by_isolation_summary$overall_pan_cat[pangenome_by_isolation_summary$allisosum == 1 ] <- "cloud"
+
+pangenome_by_isolation_summary$overall_pan_cat = factor(pangenome_by_isolation_summary$overall_pan_cat, 
+                                                        levels = c("core", "soft core", "shell", "cloud"))
+
+```
+
+###Figure 3.1 pan-genome rarefaction and categories
+```{r}
+(pancategory_count = ggplot(data = pangenome_by_isolation_summary, aes(x = overall_pan_cat)) + 
+    geom_bar(stat = 'count') +
+    theme_classic()
+)
+
+ggarrange(pancategory_count, panrarefaction, align = 'h', widths = c(1, 2))
+
+
+```
+###Figure 3.2 functional analysis of different pan-genome categories 
+
+```{r}
+COG_multi_cats = multicog_geneclusters %>% filter(COG2 != "")
+#just realized that this does not have every COG cat for every strain, for example there is no COG CAT "B" for frigidicola_056...
+#will have to make a new data frame to populate from scratch
+COG_multi_cats_separated = data.frame()
+for(i in 1:nrow(COG_multi_cats)) {
+  gen = COG_multi_cats[i,1]
+  cat = COG_multi_cats[i,2]
+  COG1 = COG_multi_cats[i,3]
+  dummy1 = c(gen, cat, COG1)
+  COG_multi_cats_separated = rbind.data.frame(COG_multi_cats_separated, as.character(dummy1), stringsAsFactors = F)
+  COG2 = COG_multi_cats[i,4]
+  dummy2 = c(gen, cat, COG2)
+  COG_multi_cats_separated = rbind.data.frame(COG_multi_cats_separated, as.character(dummy2), stringsAsFactors = F)
+  COG3 = COG_multi_cats[i,5]
+  if (COG3 != ""){
+    dummy3 = c(gen, cat, COG3)
+    COG_multi_cats_separated = rbind.data.frame(COG_multi_cats_separated, as.character(dummy3), stringsAsFactors = F)
+  }
+  COG4 = COG_multi_cats[i,6]
+  if (COG4 != ""){
+    dummy4 = c(gen, cat, COG4)
+    COG_multi_cats_separated = rbind.data.frame(COG_multi_cats_separated, as.character(dummy4), stringsAsFactors = F)
+  }
+}
+colnames(COG_multi_cats_separated) = c("geneCluster", "pan_category", "COG_category")
+
+COG_single_cats = multicog_geneclusters %>% filter(COG2 == "") %>%
+  select(geneCluster, pan_category, COG1)
+colnames(COG_single_cats)[3] = "COG_category"
+
+multiCOG_genes_corrected = rbind(COG_multi_cats_separated, COG_single_cats)
+
+multiCOG_genes_corrected$pan_category = factor(multiCOG_genes_corrected$pan_category, 
+                                               levels = c("core", "softcore", "shell", "cloud"))
+
+multiCOG_genes_corrected$COG_category = 
+  factor(multiCOG_genes_corrected$COG_category, levels = c("D", "M", "N", "O", "T", "U", "V", "W", "Z",
+                                                "A", "B","J", "K", "L","C", "E", "F", "G", "H", "I", "P", "Q",
+                                                "S", "X"))
+
+
+COGcols = c("#72300C", "#93074D", "#D60D69", "#ED5FA6", "#CE1B13", "#A50505", "#E5530A", "#E2770C", "#F9A138", 
+         "#F7F072", "#F7D239", "#CCF43B", "#5BB73D", "#057F28", 
+         "#05541A", "#20998B", "#60B1F4", "#1458F2", "#5141AF", "#1F048E", "#310872", "#520775", 
+         "#9F9FA0", "#39383A")
+
+(function_pancat = ggplot(data = multiCOG_genes_corrected, 
+                          aes(x = pan_category, fill = COG_category)) + 
+    geom_bar(stat = 'count', position = 'fill') + 
+    scale_fill_manual(values = COGcols) +
+    theme_classic())
+
+
+COG_pancat_chi = chisq.test(t(table(multiCOG_genes_corrected$pan_category, multiCOG_genes_corrected$COG_category)))
+COG_pancat_chi
+COG_pancat_cor = corrplot(COG_pancat_chi$residuals, is.cor = FALSE)
+
+#add function_pancat and COG_pancat_cor together in Illustrator
+
+```
+
+
+###Figure 3.3 and stats comparisons - proportion of genome devoted to each pan genome category
+```{r}
+psych_PCAT = left_join(psych_PCAT, pangenome_by_isolation_summary[,3:4])
+
+test = left_join(psych_PCAT[,c(2:4,33)], psych_strain_collection[,c(3,27)])
+
+test2 = as.data.frame(table(test$strainID, test$overall_pan_cat))
+colnames(test2) = c("strainID", "pan_cat", "frequency")
+test2 = left_join(test2, psych_strain_collection[,c(3,27)])
+
+number_genes_perstrain = as.data.frame(table(psych_PCAT$strainID))
+colnames(number_genes_perstrain) = c("strainID", "num_genes")
+test2 = left_join(test2, number_genes_perstrain)
+test2$ISME_source[test2$strainID == "P_sp_IAM12030_72-O-c"] <- "terrestrial"
+
+
+agg_pancat_byiso_bygenome = aggregate(test2$frequency, by = list(test2$ISME_source, test2$pan_cat), FUN = mean)
+colnames(agg_pancat_byiso_bygenome) = c("isolation_source", "pan_cat", "average_geneclusters_pergenome")
+agg_pancat_byiso_bygenome$pan_cat = factor(agg_pancat_byiso_bygenome$pan_cat, levels = c("core", "soft core", "shell", "cloud"))
+agg_pancat_byiso_bygenome_sp = spread(agg_pancat_byiso_bygenome, key = pan_cat, value = average_geneclusters_pergenome)
+
+chisq_pan_iso = chisq.test(agg_pancat_byiso_bygenome_sp[1:5,2:5])
+corrplot(chisq_pan_iso$residuals, is.corr = F)
+
+aggregate(test2$frequency, by = list(test2$pan_cat), FUN = mean)
+
+pancat_byiso_bygenome = as.data.frame(table(psych_PCAT$strainID, psych_PCAT$overall_pan_cat))
+colnames(pancat_byiso_bygenome) = c("strainID", "pan_cat", "frequency")
+pancat_byiso_bygenome = left_join(pancat_byiso_bygenome, psych_strain_collection[,c(3,27)])
+pancat_byiso_bygenome = left_join(pancat_byiso_bygenome, number_genes_perstrain)
+
+  
+pancat_byiso_bygenome$ISME_source = factor(pancat_byiso_bygenome$ISME_source, 
+                                           levels = c("warm host", "other host", "food", "marine", "terrestrial"))
+pancat_byiso_bygenome$pan_cat = factor(pancat_byiso_bygenome$pan_cat, 
+                                           levels = c("core", "soft core", "shell", "cloud"))
+
+pancat_byiso_bygenome$ISME_source[pancat_byiso_bygenome$strainID == "P_sp_IAM12030_72-O-c"] <- "terrestrial"
+
+
+pancat_byiso_bygenome_sp = spread(pancat_byiso_bygenome, key = "pan_cat", value = "frequency")
+pancat_byiso_bygenome_sp$core_prop = pancat_byiso_bygenome_sp$core/pancat_byiso_bygenome_sp$num_genes
+pancat_byiso_bygenome_sp$softcore_prop = pancat_byiso_bygenome_sp$`soft core`/pancat_byiso_bygenome_sp$num_genes
+pancat_byiso_bygenome_sp$shell_prop = pancat_byiso_bygenome_sp$shell/pancat_byiso_bygenome_sp$num_genes
+pancat_byiso_bygenome_sp$cloud_prop = pancat_byiso_bygenome_sp$cloud/pancat_byiso_bygenome_sp$num_genes
+
+pancat_byiso_bygenome_ga = pancat_byiso_bygenome_sp %>% 
+  gather(core_prop, softcore_prop, shell_prop, cloud_prop, key = "pan_cat", value = "proportion") %>%
+  select(-core, -`soft core`, -shell, -cloud)
+
+pancat_byiso_bygenome_ga$pan_cat = str_remove(pancat_byiso_bygenome_ga$pan_cat, "_prop")
+pancat_byiso_bygenome_ga$pan_cat = factor(pancat_byiso_bygenome_ga$pan_cat, 
+                                          levels = c("core", "softcore", "shell", "cloud"))
+
+
+(genenum_iso = ggplot(data = pancat_byiso_bygenome_ga, aes(x = ISME_source, y= num_genes, color = ISME_source)) + 
+  geom_boxplot(alpha = 0) + 
+  geom_point(position=position_dodge(width=0.75),aes(group=ISME_source)) +
+  scale_color_manual(values = ISMEcolors) +
+  #facet_grid(.~pan_cat, scales = "free") +
+  theme_classic())
+
+(pan_str_iso = ggplot(data = pancat_byiso_bygenome_ga, aes(x = ISME_source, y= proportion, color = ISME_source)) + 
+  geom_boxplot(alpha = 0) + 
+  geom_point(position=position_dodge(width=0.75),aes(group=ISME_source)) +
+  scale_color_manual(values = ISMEcolors) +
+  facet_grid(.~pan_cat, scales = "free") +
+  theme_classic())
+
+stats_core = pancat_byiso_bygenome_ga %>% filter(pan_cat == 'core')
+kruskal.test(proportion ~ ISME_source, data = stats_core)
+pairwise.wilcox.test(x = stats_core$proportion, g = stats_core$ISME_source, p.adjust.method = 'BH')
+aggregate(stats_core$proportion, by = list(stats_core$ISME_source), FUN = median)
+
+stats_softcore = pancat_byiso_bygenome_ga %>% filter(pan_cat == 'softcore')
+kruskal.test(proportion ~ ISME_source, data = stats_softcore)
+pairwise.wilcox.test(x = stats_softcore$proportion, g = stats_softcore$ISME_source, p.adjust.method = 'BH')
+aggregate(stats_softcore$proportion, by = list(stats_softcore$ISME_source), FUN = median)
+
+stats_shell = pancat_byiso_bygenome_ga %>% filter(pan_cat == 'shell')
+kruskal.test(proportion ~ ISME_source, data = stats_shell)
+pairwise.wilcox.test(x = stats_shell$proportion, g = stats_shell$ISME_source, p.adjust.method = 'BH')
+aggregate(stats_shell$proportion, by = list(stats_shell$ISME_source), FUN = median)
+
+stats_cloud = pancat_byiso_bygenome_ga %>% filter(pan_cat == 'cloud')
+kruskal.test(proportion ~ ISME_source, data = stats_cloud)
+pairwise.wilcox.test(x = stats_cloud$proportion, g = stats_cloud$ISME_source, p.adjust.method = 'BH')
+aggregate(stats_cloud$proportion, by = list(stats_cloud$ISME_source), FUN = median)
+
+```
+
+###Figure 3.4 unique gene content between isolation sources
+```{r}
+warm = psych_strain_collection %>% filter(ISME_source == "warm host") %>% select(strainID) %>% unlist() %>% unname()
+other = psych_strain_collection %>% filter(ISME_source == "other host") %>% select(strainID) %>% unlist() %>% unname()
+food = psych_strain_collection %>% filter(ISME_source == "food") %>% select(strainID) %>% unlist() %>% unname()
+marine = psych_strain_collection %>% filter(ISME_source == "marine") %>% select(strainID) %>% unlist() %>% unname()
+terrestrial = psych_strain_collection %>% filter(ISME_source == "terrestrial") %>% select(strainID) %>% unlist() %>% unname()
+
+warmseqsum = rowSums(genes_mat_numbered[,colnames(genes_mat_numbered) %in% warm])
+names(warmseqsum) = rownames(genes_mat)
+warmisosum = rowSums(genematrix_binary[,colnames(genematrix_binary) %in% warm])
+names(warmisosum) = rownames(genes_mat)
+
+otherseqsum = rowSums(genes_mat_numbered[,colnames(genes_mat_numbered) %in% other])
+names(otherseqsum) = rownames(genes_mat)
+otherisosum = rowSums(genematrix_binary[,colnames(genematrix_binary) %in% other])
+names(otherisosum) = rownames(genes_mat)
+
+foodseqsum = rowSums(genes_mat_numbered[,colnames(genes_mat_numbered) %in% food])
+names(otherseqsum) = rownames(genes_mat)
+foodisosum = rowSums(genematrix_binary[,colnames(genematrix_binary) %in% food])
+names(foodisosum) = rownames(genes_mat)
+
+marineseqsum = rowSums(genes_mat_numbered[,colnames(genes_mat_numbered) %in% marine])
+names(marineseqsum) = rownames(genes_mat)
+marineisosum = rowSums(genematrix_binary[,colnames(genematrix_binary) %in% marine])
+names(marineisosum) = rownames(genes_mat)
+
+terrestrialseqsum = rowSums(genes_mat_numbered[,colnames(genes_mat_numbered) %in% terrestrial])
+names(terrestrialseqsum) = rownames(genes_mat)
+terrestrialisosum = rowSums(genematrix_binary[,colnames(genematrix_binary) %in% terrestrial])
+names(terrestrialisosum) = rownames(genes_mat)
+
+allseqsum = rowSums(genes_mat_numbered)
+names(allseqsum) = rownames(genes_mat)
+allisosum = rowSums(genematrix_binary)
+names(allisosum) = rownames(genes_mat)
+
+pan_str_iso = rbind(allseqsum, allisosum, warmseqsum, warmisosum, otherseqsum, otherisosum, 
+                                       foodseqsum, foodisosum, marineseqsum, marineisosum, terrestrialseqsum, terrestrialisosum)
+
+pan_str_iso = t(pan_str_iso)
+pan_str_iso = as.data.frame(pan_str_iso)
+pan_str_iso$geneCluster = rownames(pan_str_iso)
+
+
+pan_str_iso$overall_pan_cat = NA
+pan_str_iso$overall_pan_cat[pan_str_iso$allisosum >= 84] <- "core"
+pan_str_iso$overall_pan_cat[pan_str_iso$allisosum <= 83 & pan_str_iso$allisosum >= 77] <- "soft core"
+pan_str_iso$overall_pan_cat[pan_str_iso$allisosum <= 82 & pan_str_iso$allisosum >= 2 ] <- "shell"
+pan_str_iso$overall_pan_cat[pan_str_iso$allisosum == 1 ] <- "cloud"
+
+pan_str_iso$warm_pan_cat = NA
+pan_str_iso$warm_pan_cat[pan_str_iso$warmisosum >= 13] <- "core"
+pan_str_iso$warm_pan_cat[pan_str_iso$warmisosum <= 12 & pan_str_iso$warmisosum >= 2 ] <- "shell"
+pan_str_iso$warm_pan_cat[pan_str_iso$warmisosum == 1 ] <- "cloud"
+pan_str_iso$warm_pan_cat[pan_str_iso$warmisosum == 0 ] <- "absent"
+
+pan_str_iso$other_pan_cat = NA
+pan_str_iso$other_pan_cat[pan_str_iso$otherisosum >= 20] <- "core"
+pan_str_iso$other_pan_cat[pan_str_iso$otherisosum <= 19 & pan_str_iso$otherisosum >= 2 ] <- "shell"
+pan_str_iso$other_pan_cat[pan_str_iso$otherisosum == 1 ] <- "cloud"
+pan_str_iso$other_pan_cat[pan_str_iso$otherisosum == 0 ] <- "absent"
+
+pan_str_iso$food_pan_cat = NA
+pan_str_iso$food_pan_cat[pan_str_iso$foodisosum == 11] <- "core"
+pan_str_iso$food_pan_cat[pan_str_iso$foodisosum <= 10 & pan_str_iso$foodisosum >= 2 ] <- "shell"
+pan_str_iso$food_pan_cat[pan_str_iso$foodisosum == 1 ] <- "cloud"
+pan_str_iso$food_pan_cat[pan_str_iso$foodisosum == 0 ] <- "absent"
+
+pan_str_iso$marine_pan_cat = NA
+pan_str_iso$marine_pan_cat[pan_str_iso$marineisosum >= 19] <- "core"
+pan_str_iso$marine_pan_cat[pan_str_iso$marineisosum <= 18 & pan_str_iso$marineisosum >= 2 ] <- "shell"
+pan_str_iso$marine_pan_cat[pan_str_iso$marineisosum == 1 ] <- "cloud"
+pan_str_iso$marine_pan_cat[pan_str_iso$marineisosum == 0 ] <- "absent"
+
+pan_str_iso$terrestrial_pan_cat = NA
+pan_str_iso$terrestrial_pan_cat[pan_str_iso$terrestrialisosum >= 15] <- "core"
+pan_str_iso$terrestrial_pan_cat[pan_str_iso$terrestrialisosum <= 14 & pan_str_iso$terrestrialisosum >= 2 ] <- "shell"
+pan_str_iso$terrestrial_pan_cat[pan_str_iso$terrestrialisosum == 1 ] <- "cloud"
+pan_str_iso$terrestrial_pan_cat[pan_str_iso$terrestrialisosum == 0 ] <- "absent"
+
+unique_warm = pan_str_iso %>% filter(warm_pan_cat != "absent" & other_pan_cat == "absent" & food_pan_cat == "absent" & marine_pan_cat == "absent" & terrestrial_pan_cat == "absent") %>% select(geneCluster) %>% unlist() %>% unname
+unique_warm_annot = multiCOG_genes_corrected %>% filter(geneCluster %in% unique_warm)
+unique_warm_annot$isolation = "warm"
+
+unique_other = pan_str_iso %>% filter(warm_pan_cat == "absent" & other_pan_cat != "absent" & food_pan_cat == "absent" & marine_pan_cat == "absent" & terrestrial_pan_cat == "absent") %>% select(geneCluster) %>% unlist() %>% unname
+unique_other_annot = multiCOG_genes_corrected %>% filter(geneCluster %in% unique_other)
+unique_other_annot$isolation = "other"
+
+unique_food = pan_str_iso %>% filter(warm_pan_cat == "absent" & other_pan_cat == "absent" & food_pan_cat != "absent" & marine_pan_cat == "absent" & terrestrial_pan_cat == "absent") %>% select(geneCluster) %>% unlist() %>% unname
+unique_food_annot = multiCOG_genes_corrected %>% filter(geneCluster %in% unique_food)
+unique_food_annot$isolation = "food"
+
+unique_marine = pan_str_iso %>% filter(warm_pan_cat == "absent" & other_pan_cat == "absent" & food_pan_cat == "absent" & marine_pan_cat != "absent" & terrestrial_pan_cat == "absent") %>% select(geneCluster) %>% unlist() %>% unname
+unique_marine_annot = multiCOG_genes_corrected %>% filter(geneCluster %in% unique_marine)
+unique_marine_annot$isolation = "marine"
+
+unique_terrestrial = pan_str_iso %>% filter(warm_pan_cat == "absent" & other_pan_cat == "absent" & food_pan_cat == "absent" & marine_pan_cat == "absent" & terrestrial_pan_cat != "absent") %>% select(geneCluster) %>% unlist() %>% unname
+unique_terrestrial_annot = multiCOG_genes_corrected %>% filter(geneCluster %in% unique_terrestrial)
+unique_terrestrial_annot$isolation = "terrestrial"
+
+unique_genes_per_isolation = rbind(unique_warm_annot, unique_other_annot, unique_food_annot, unique_marine_annot, unique_terrestrial_annot)
+
+unique_genes_per_isolation$isolation = factor(unique_genes_per_isolation$isolation, levels = c("warm", "other", "food", "marine", "terrestrial"))
+unique_genes_per_isolation$COG_category = factor(unique_genes_per_isolation$COG_category, levels = c("D", "M", "N", "O", "T", "U", "V", "W", "Z",
+                                                                                 "A", "B","J", "K", "L",
+                                                                                 "C", "E", "F", "G", "H", "I", "P", "Q",
+                                                                                 "S", "X"))
+cols = c("#72300C", "#93074D", "#D60D69", "#ED5FA6", "#CE1B13", "#A50505",
+         "#E5530A", "#E2770C", "#F9A138", "#F7F072", "#F7D239", "#CCF43B",
+         "#5BB73D", "#057F28", "#05541A", "#20998B", "#60B1F4", "#1458F2",
+         "#5141AF", "#1F048E", "#310872", "#520775", "#9F9FA0", "#39383A")
+
+(unique_gene_content = ggplot(data = unique_genes_per_isolation, aes(x = isolation, fill = COG_category)) +
+  geom_bar(stat = 'count') +
+  scale_fill_manual(values = cols) +
+  theme_classic())
+
+unique_corr = table(unique_genes_per_isolation$isolation, unique_genes_per_isolation$COG_category)
+chisq_uni_iso = chisq.test(unique_corr)
+corrplot(chisq_uni_iso$residuals, is.corr = F)
+
+#add unique_gene_content w corrplot in illustrator
+
+```
+
+#Pan-genome wide association study with isolation source as trait. 
+```{r}
+unique(psych_strain_collection$ISME_source)
+
+isolationsource = psych_strain_collection[,c(3,27)]
+isolationsource$dummy = 1
+isolationsource = isolationsource %>%
+  spread(key = ISME_source, value = dummy)
+isolationsource[is.na(isolationsource)] <- 0
+rownames(isolationsource) = isolationsource$strainID
+
+WH <- as.vector(unlist(isolationsource$`warm host`))
+names(WH) = rownames(isolationsource)
+all(names(WH) %in% rownames(genematrix_treewas))
+all(rownames(genematrix_treewas) %in% names(WH))
+WH_treewas <- treeWAS(snps = genematrix_treewas, phen = WH, tree = P.tree.noout, seed = 1)
+print(WH_treewas)
+
+OH <- as.vector(unlist(isolationsource$`other host`))
+names(OH) = rownames(isolationsource)
+all(names(OH) %in% rownames(genematrix_treewas))
+all(rownames(genematrix_treewas) %in% names(OH))
+OH_treewas <- treeWAS(snps = genematrix_treewas, phen = OH, tree = P.tree.noout, seed = 1)
+print(OH_treewas)
+
+Fo <- as.vector(unlist(isolationsource$food))
+names(Fo) = rownames(isolationsource)
+all(names(Fo) %in% rownames(genematrix_treewas))
+all(rownames(genematrix_treewas) %in% names(Fo))
+Fo_treewas <- treeWAS(snps = genematrix_treewas, phen = Fo, tree = P.tree.noout, seed = 1)
+print(Fo_treewas)
+
+Ma <- as.vector(unlist(isolationsource$marine))
+names(Ma) = rownames(isolationsource)
+all(names(Ma) %in% rownames(genematrix_treewas))
+all(rownames(genematrix_treewas) %in% names(Ma))
+Ma_treewas <- treeWAS(snps = genematrix_treewas, phen = Ma, tree = P.tree.noout, seed = 1)
+print(Ma_treewas)
+
+Te <- as.vector(unlist(isolationsource$terrestrial))
+names(Te) = rownames(isolationsource)
+all(names(Te) %in% rownames(genematrix_treewas))
+all(rownames(genematrix_treewas) %in% names(Te))
+Te_treewas <- treeWAS(snps = genematrix_treewas, phen = Te, tree = P.tree.noout, seed = 1)
+print(Te_treewas)
+
+OH_treewas_gc = OH_treewas$treeWAS.combined$treeWAS.combined %>% unlist()
+OH_treewas_annotated = psych_eggnog_annotations %>% filter(geneCluster %in% OH_treewas_gc)
+
+Fo_treewas_gc = Fo_treewas$treeWAS.combined$treeWAS.combined %>% unlist()
+Fo_treewas_annotated = psych_eggnog_annotations %>% filter(geneCluster %in% Fo_treewas_gc)
+
+Ma_treewas_gc = Ma_treewas$treeWAS.combined$treeWAS.combined %>% unlist()
+Ma_treewas_annotated = psych_eggnog_annotations %>% filter(geneCluster %in% Ma_treewas_gc)
+
+Te_treewas_gc = Te_treewas$treeWAS.combined$treeWAS.combined %>% unlist()
+Te_treewas_annotated = psych_eggnog_annotations %>% filter(geneCluster %in% Te_treewas_gc)
+
+```
+
+#Isolation source ancestral character estimation.
+
+```{r}
+
+#two state ancestral state reconstruction
+ordered_df = strain_collection[match(M.tree$tip.label, strain_collection$strainID),]
+rownames(ordered_df) = ordered_df$strainID
+x1<-setNames(ordered_df[,21],rownames(ordered_df))
+x1col = c("deepskyblue3", "orange")
+
+fitER1 = ace(x1, M.tree, model = "ER", type = "discrete", marginal = TRUE)
+fitSYM1 = ace(x1, M.tree, model = "SYM", type = "discrete", marginal = TRUE)
+fitARD1 = ace(x1, M.tree, model = "ARD", type = "discrete", marginal = TRUE)
+
+#ARD model maximizes likelihood, but does it do so significantly?
+1 - pchisq(2*abs(fitARD1$loglik - fitER1$loglik), 1) #p = 0.15
+1 - pchisq(2*abs(fitARD1$loglik - fitSYM1$loglik), 1) #p = 0.15
+
+#ok, so is there a difference between ER and SYM?
+1 - pchisq(2*abs(fitER1$loglik - fitSYM1$loglik), 1)
+#no
+#so I will go with the simplest ER model
+
+plotTree(M.tree,fsize=0.8,ftype="i")
+nodelabels(node=1:M.tree$Nnode+Ntip(M.tree),pie=fitER1$lik.anc,piecol = x1col,cex=0.5)
+#tiplabels(pie=to.matrix(x1[M.tree$tip.label],levels(x1)),piecol = x1col,cex=0.3)
+#add.simmap.legend(leg=sort(unique(x1)),colors=x1col,x=0.9*par()$usr[1],
+#                  y=-max(nodeHeights(M.tree)),fsize=0.8)
+
+#plotTree(M.tree,fsize=0.8,ftype="i")
+tiplabels(pie=to.matrix(x1,sort(unique(x1))),piecol=x1col,cex=0.3)
+add.simmap.legend(colors=x1col,prompt=FALSE,x=0.9*par()$usr[1],
+                  y=-max(nodeHeights(M.tree)),fsize=0.8)
+
+fitER1
+
+psychroot = drop.tip(M.tree, c("M_boevrei","M_atlantae","M_osloensis","A_puyangensis",
+                     "M_cuniculi","M_porci","M_pluranimalium","M_canis","M_catarrhalis","M_caviae",
+                     "M_ovis","M_bovoculi","M_oblonga","M_equi","M_bovis","M_caprae","M_lacunata","M_nonliquefaciens"))
+
+
+x1psychroot<-x1[names(x1) %in% psychroot$tip.label]
+fitER_psychroot = ace(x1psychroot, psychroot, model = "ER", type = "discrete", marginal = TRUE)
+
+fitER_psychroot
+
+plotTree(psychroot,fsize=0.8,ftype="i")
+nodelabels(node=1:psychroot$Nnode+Ntip(psychroot),pie=fitER_psychroot$lik.anc,piecol = x1col,cex=0.5)
+#tiplabels(pie=to.matrix(x1psychroot[psychroot$tip.label],levels(x1psychroot)),piecol = x1col,cex=0.3)
+#add.simmap.legend(leg=sort(unique(x1psychroot)),colors=x1col,x=0.9*par()$usr[1],
+#                  y=-max(nodeHeights(psychroot)),fsize=0.8)
+
+#plotTree(M.tree,fsize=0.8,ftype="i")
+tiplabels(pie=to.matrix(x1psychroot,sort(unique(x1psychroot))),piecol=x1col,cex=0.3)
+add.simmap.legend(colors=x1col,prompt=FALSE,x=0.9*par()$usr[1],
+                  y=-max(nodeHeights(psychroot)),fsize=0.8)
+
+
+#now by more specific isolation sources 
+ordered_df$ISME_source = factor(ordered_df$ISME_source,
+                                levels = c("warm host", "other host", "food", "marine", "terrestrial"))
+x2<-setNames(ordered_df[,19],rownames(ordered_df))
+x2col = c("#F9D503", "#5DC863", "#21908C", "#3B528B", "#440154")
+
+fitER2 = ace(x2, M.tree, model = "ER", type = "discrete", marginal = TRUE)
+fitSYM2 = ace(x2, M.tree, model = "SYM", type = "discrete", marginal = TRUE)
+fitARD2 = ace(x2, M.tree, model = "ARD", type = "discrete", marginal = TRUE)
+
+#ARD model maximizes likelihood, but does it do so significantly?
+1 - pchisq(2*abs(fitARD2$loglik - fitER2$loglik), 1) #p = 1.110223e-15
+1 - pchisq(2*abs(fitARD2$loglik - fitSYM2$loglik), 1) #p = 4.260376e-05
+
+#both significant, so
+#I will go with the ARD model
+
+1 - pchisq(2*abs(fitSYM2$loglik - fitER2$loglik), 1)
+
+plotTree(M.tree,fsize=0.8,ftype="i")
+tiplabels(pie=to.matrix(x2,sort(unique(x2))),piecol=x2col,cex=0.3)
+add.simmap.legend(colors=x2col,prompt=FALSE,x=0.9*par()$usr[1],
+                  y=-max(nodeHeights(M.tree)),fsize=0.8)
+
+#plotTree(M.tree,fsize=0.8,ftype="i")
+nodelabels(node=1:M.tree$Nnode+Ntip(M.tree),pie=fitER2$lik.anc,piecol = x2col,cex=0.5)
+#tiplabels(pie=to.matrix(x2[M.tree$tip.label],levels(x2)),piecol = x2col,cex=0.3)
+#add.simmap.legend(leg=sort(unique(x2)),colors=x2col,x=0.9*par()$usr[1],
+#                  y=-max(nodeHeights(M.tree)),fsize=0.8)
+
+x2psychroot<-x2[names(x2) %in% psychroot$tip.label]
+fitER2_psychroot = ace(x2psychroot, psychroot, model = "ER", type = "discrete", marginal = TRUE)
+
+fitER2_psychroot
+
+plotTree(psychroot,fsize=0.8,ftype="i")
+nodelabels(node=1:psychroot$Nnode+Ntip(psychroot),pie=fitER2_psychroot$lik.anc,piecol = x2col,cex=0.5)
+#tiplabels(pie=to.matrix(x2psychroot[psychroot$tip.label],levels(x1psychroot)),piecol = x2col,cex=0.3)
+#add.simmap.legend(leg=sort(unique(x2psychroot)),colors=x2col,x=0.9*par()$usr[1],
+#                  y=-max(nodeHeights(psychroot)),fsize=0.8)
+
+#plotTree(M.tree,fsize=0.8,ftype="i")
+tiplabels(pie=to.matrix(x2psychroot,sort(unique(x2psychroot))),piecol=x2col,cex=0.3)
+add.simmap.legend(colors=x2col,prompt=FALSE,x=0.9*par()$usr[1],
+                  y=-max(nodeHeights(psychroot)),fsize=0.8)
+
+```
+
+
+#Predicted cold-adapted protein traits.
+###Figure 3.6
+```{r}
+psych_genecluster_summ = as.data.frame(table(psych_PCAT$geneCluster))
+colnames(psych_genecluster_summ) = c("geneCluster", "frequency")
+
+highpcatfreq = as.data.frame(table(psych_highPCAT$geneCluster))
+colnames(highpcatfreq) = c("geneCluster", "freq_highPCAT")
+
+psych_genecluster_summ = left_join(psych_genecluster_summ, highpcatfreq)
+psych_genecluster_summ$freq_highPCAT[is.na(psych_genecluster_summ$freq_highPCAT) == TRUE] <- 0
+psych_genecluster_summ$perc_highPCAT = psych_genecluster_summ$freq_highPCAT/psych_genecluster_summ$frequency
+
+psych_genecluster_summ_nosingletons = psych_genecluster_summ %>% filter(frequency != 1)
+
+(perHPCAT = ggplot(data = psych_genecluster_summ, aes(x = perc_highPCAT)) + geom_histogram() + theme_classic() + xlab("Percentage of CDS in geneCluster that are classified as 'highly cold adaptive'"))
+(perHPCAT_noS = ggplot(data = psych_genecluster_summ_nosingletons, aes(x = perc_highPCAT)) + geom_histogram() + theme_classic() + xlab("Percentage of CDS in geneCluster that are classified as 'highly cold adaptive', singletons removed"))
+
+ggarrange(perHPCAT, perHPCAT_noS, align = 'h', labels = c("A", "B"))
+```
+
+###Figure 3.7
+```{r}
+psych_PCAT_strainID_summ = as.data.frame(table(psych_PCAT$strainID))
+colnames(psych_PCAT_strainID_summ) = c("strainID", "frequency")
+highpcat_bystrain = as.data.frame(table(psych_highPCAT$strainID))
+colnames(highpcat_bystrain) = c("strainID", "freq_highPCAT")
+
+psych_PCAT_strainID_summ = left_join(psych_PCAT_strainID_summ, highpcat_bystrain)
+psych_PCAT_strainID_summ$perc_highPCAT = psych_PCAT_strainID_summ$freq_highPCAT/psych_PCAT_strainID_summ$frequency
+
+perc_highPCAT = psych_PCAT_strainID_summ$perc_highPCAT
+names(perc_highPCAT) = psych_PCAT_strainID_summ$strainID
+setdiff(names(perc_highPCAT), P.tree.noout$tip.label)
+phylo_PCAT = phylosig(tree = P.tree.noout, x = perc_highPCAT, test = TRUE)
+phylo_PCAT
+
+(HPCAT_bystrain = ggplot(data = psych_PCAT_strainID_summ, aes(x = perc_highPCAT)) + geom_histogram() + theme_classic() + xlab("Percentage of highly cold adaptive proteins by strain"))
+
+psych_genome_summaries = left_join(psych_genome_summaries, psych_strain_collection[,c(3,5,21,27)])
+psych_PCAT_strainID_summ$strainID = as.character(psych_PCAT_strainID_summ$strainID)
+psych_PCAT_strainID_summ$strainID[psych_PCAT_strainID_summ$strainID == "P_sp_IAM12030_72-O-c"] <- "P_sp_IAM12030-72-O-c"
+
+psych_PCAT_strainID_summ = left_join(psych_PCAT_strainID_summ, psych_genome_summaries[,c(19,5,20,21)])
+psych_PCAT_strainID_summ$temprange = "mesophile"
+psych_PCAT_strainID_summ$temprange[psych_PCAT_strainID_summ$strainID == "P_frigidicola_ACAM304" |
+                                     psych_PCAT_strainID_summ$strainID == "P_frigidicola_ACAM309" |
+                                     psych_PCAT_strainID_summ$strainID == "P_sp_72-O-c" |
+                                     psych_PCAT_strainID_summ$strainID == "P_sp_IAM12030-72-O-c" |
+                                     psych_PCAT_strainID_summ$strainID == "P_urativorans_ACAM311"] <- "psychrophile"
+
+wilcox.test(perc_highPCAT ~ temprange, data = psych_PCAT_strainID_summ)
+kruskal.test(frequency ~ ISME_source, data = psych_PCAT_strainID_summ)
+kruskal.test(Genome.size..bp. ~ ISME_source, data = psych_PCAT_strainID_summ)
+
+
+(genes_by_isosource = ggplot(data = psych_PCAT_strainID_summ, aes(x = ISME_source, y = frequency)) + 
+  geom_boxplot(alpha = 0, aes(color = ISME_source)) + 
+    geom_point(aes(color = ISME_source)) +
+    scale_color_manual(values = ISMEcolors) +
+    geom_signif(comparisons = list(c("warm host", "other host"), c("warm host", "food"), c("other host", "marine"), c("other host", "terrestrial"), c("food", "marine"), c("food", "terrestrial")), map_signif_level = T) +
+  theme_classic() +
+    ylab("# of genes per genome"))
+
+#all pairwise comparisons:
+#comparisons = split(t(combn(levels(psych_PCAT_strainID_summ$ISME_source), 2)), seq(nrow(t(combn(levels(psych_PCAT_strainID_summ$ISME_source), 2)))))
+pairwise.wilcox.test(x = psych_PCAT_strainID_summ$Genome.size..bp., g = psych_PCAT_strainID_summ$ISME_source, p.adjust.method = 'BH')
+pairwise.wilcox.test(x = psych_PCAT_strainID_summ$frequency, g = psych_PCAT_strainID_summ$ISME_source, p.adjust.method = 'BH')
+
+(HCA_by_temprange = ggplot(data = psych_PCAT_strainID_summ, aes(x = temprange, y = perc_highPCAT)) + 
+    geom_boxplot(alpha = 0) +
+    theme_classic() +
+    ylab("% of genes that are highly cold adapted"))
+
+psych_PCAT_strainID_summ$ISME_source = factor(psych_PCAT_strainID_summ$ISME_source, levels = c("warm host", "other host", "food", "marine", "terrestrial"))
+(HCA_by_isosource = ggplot(data = psych_PCAT_strainID_summ, aes(x = ISME_source, y = perc_highPCAT)) + 
+  geom_boxplot(alpha = 0, aes(color = ISME_source)) + 
+    geom_point(aes(color = ISME_source)) +
+    scale_color_manual(values = ISMEcolors) +
+  theme_classic() +
+    ylab("% of genes that are highly cold adapted"))
+
+kruskal.test(perc_highPCAT ~ ISME_source, data = psych_PCAT_strainID_summ)
+
+ggarrange(HCA_by_temprange, HCA_by_isosource, labels = c("A", "B"), widths = c(1, 3))
+```
+
+###figure 3.8
+```{r}
+highPCATlocus = psych_highPCAT %>% select(locus_tag) %>% unlist() %>% unname()
+psych_PCAT$PCAT = NA
+psych_PCAT$PCAT[psych_PCAT$locus_tag %in% highPCATlocus] <- "high"
+psych_PCAT$PCAT[is.na(psych_PCAT$PCAT) == TRUE] <- "not"
+psych_PCAT$PCAT = factor(psych_PCAT$PCAT, levels = c("not", "high"))
+
+psych_PCAT_annot = left_join(psych_PCAT, multiCOG_genes_corrected)
+
+(function_PCAT = ggplot(data = psych_PCAT_annot, 
+                          aes(x = PCAT, fill = COG_category)) + 
+    geom_bar(stat = 'count', position = 'fill') + 
+    scale_fill_manual(values = COGcols) +
+    theme_classic())
+
+COG_PCAT_chi = chisq.test(t(table(psych_PCAT_annot$PCAT, psych_PCAT_annot$COG_category)))
+COG_PCAT_chi
+COG_PCAT_cor = corrplot(COG_PCAT_chi$residuals, is.cor = FALSE)
+
+#arrange function_PCAT w corrplot in illustrator
+```
+
+
+
